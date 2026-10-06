@@ -1,227 +1,274 @@
 """
-Agente de Comparação — analisa diferenças entre duas apólices D&O.
+Agente de Comparação — compara duas ou mais apólices D&O.
+
+Duas etapas, de propósito:
+  1. Alinhamento determinístico: os valores de cada tópico vêm direto da ficha técnica
+     extraída. O LLM nunca "recita" valores, então não pode inventá-los.
+  2. Análise pelo LLM: recebe só os tópicos em que há divergência e julga a relevância,
+     indica qual apólice é mais favorável ao segurado e redige resumo e recomendação.
+
+Se o LLM falhar, a comparação continua disponível em modo determinístico.
 """
 from __future__ import annotations
+
 import json
 import logging
-import os
+import re
+import unicodedata
+from typing import Optional, Sequence
 
-from models.schemas import ApoliceExtraida, RelatorioComparativo, DiferencaCobertura
+from agents.llm_client import LLMError, generate_json_ex
+from app.config import DEFAULT_MODELS
+from models.schemas import (
+    AnaliseLLM,
+    ApoliceExtraida,
+    DiferencaTopico,
+    RelatorioComparativo,
+    TOPICOS_AGREGADOS,
+    TOPICOS_FICHA,
+    ValorApolice,
+    categoria_topico,
+    rotulo_topico,
+)
 
 logger = logging.getLogger(__name__)
 
-COMPARISON_SYSTEM_PROMPT = """Você é um especialista em seguros D&O com expertise em análise comparativa de apólices.
+# Tópicos cadastrais comparados além da ficha técnica (campo da apólice → rótulo).
+CAMPOS_CADASTRAIS = {
+    "seguradora": "Seguradora",
+    "limite_global": "Limite global",
+    "premio": "Prêmio",
+    "vigencia": "Vigência",
+    "versao_documento": "Versão do documento",
+}
 
-Sua tarefa é comparar duas apólices D&O estruturadas e identificar diferenças relevantes para tomada de decisão.
+COMPARISON_SYSTEM_PROMPT = """Você é um corretor e analista sênior de seguros D&O, especialista em comparar condições de apólices para apoiar a decisão de quem contrata.
 
-INSTRUÇÕES:
-1. Compare sistematicamente todos os campos: dados cadastrais, coberturas, exclusões e limites.
-2. Classifique a relevância de cada diferença como: "alta" (impacto direto na cobertura/custo), "media" (relevante mas não crítica), "baixa" (diferença formal/administrativa).
-3. Para diferenças em coberturas: avalie qual apólice oferece proteção mais ampla.
-4. Para diferenças em exclusões: uma exclusão adicional na apólice A em relação à B é desvantagem para A.
-5. Produza um resumo executivo claro e uma recomendação técnica.
-6. Retorne APENAS JSON válido seguindo o schema fornecido.
-"""
+Você receberá, para cada tópico, o que cada apólice diz. Os valores já foram extraídos dos documentos — NÃO os repita nem os corrija; avalie-os.
 
-COMPARISON_USER_TEMPLATE = """Compare as duas apólices D&O abaixo e retorne um JSON estruturado com as diferenças.
-
-SCHEMA ESPERADO:
-{{
-  "apolice_a": "identificador",
-  "apolice_b": "identificador",
-  "diferencas_cadastrais": [
-    {{"campo": "string", "valor_a": "string|null", "valor_b": "string|null", "relevancia": "alta|media|baixa", "comentario": "string"}}
-  ],
-  "diferencas_coberturas": [...],
-  "diferencas_exclusoes": [...],
-  "diferencas_limites": [...],
-  "resumo_executivo": "string",
-  "recomendacao": "string"
-}}
-
-APÓLICE A — {nome_a}:
-{json_a}
-
-APÓLICE B — {nome_b}:
-{json_b}
-"""
+REGRAS:
+1. Responda com um item em `topicos` para CADA tópico recebido, usando a chave exata.
+2. `relevancia`: 'alta' (muda a proteção efetiva ou o risco financeiro do segurado), 'media' (relevante, mas contornável) ou 'baixa' (diferença formal).
+3. `comentario`: 1 a 2 frases dizendo QUAL é a diferença prática e por que importa. Não copie os valores integralmente.
+4. `mais_favoravel`: nome exato da apólice mais favorável ao segurado naquele tópico, ou null se forem equivalentes ou não for possível julgar. Para exclusões, ter MENOS exclusões é mais favorável. Quando uma apólice não trata do tópico, diga isso no comentário e não presuma que seja pior.
+5. `resumo_executivo`: 4 a 6 frases com as diferenças que mais pesam na decisão.
+6. `recomendacao`: indique, justificando, em que perfil de contratante cada apólice se sai melhor. Seja prudente: a análise é de condições contratuais, não de preço.
+7. Escreva em português."""
 
 
-def _get_llm_response(prompt_system: str, prompt_user: str, provider: str, model: str) -> str:
-    if provider == "openai":
-        from openai import OpenAI
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": prompt_system},
-                {"role": "user", "content": prompt_user},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
+def _norm(texto: str) -> str:
+    base = unicodedata.normalize("NFKD", texto or "")
+    base = "".join(c for c in base if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", base).strip().lower()
+
+
+# ─── Nomes e valores por apólice ─────────────────────────────────────────────
+
+def nomes_unicos(apolices: Sequence[ApoliceExtraida]) -> list[str]:
+    """Rótulo legível e único para cada apólice (seguradora ou nome do arquivo)."""
+    nomes: list[str] = []
+    for i, ap in enumerate(apolices, start=1):
+        base = (ap.dados_apolice.seguradora or ap.nome_arquivo or f"Apólice {i}").strip()
+        nome, n = base, 2
+        while nome in nomes:
+            nome, n = f"{base} ({n})", n + 1
+        nomes.append(nome)
+    return nomes
+
+
+def _resumo_lista(itens: list[str], limite: int = 400) -> Optional[str]:
+    if not itens:
+        return None
+    texto = "; ".join(itens)
+    return texto if len(texto) <= limite else texto[: limite - 1].rstrip() + "…"
+
+
+def _valores_do_topico(chave: str, apolice: ApoliceExtraida, nome: str) -> ValorApolice:
+    """Valor (e página de origem) de um tópico para uma apólice."""
+    if chave in TOPICOS_FICHA:
+        item = apolice.ficha_por_topico().get(chave)
+        if item and item.valor:
+            return ValorApolice(apolice=nome, valor=item.valor, pagina=item.fonte.pagina if item.fonte else None)
+        return ValorApolice(apolice=nome)
+
+    if chave == "lista_coberturas":
+        return ValorApolice(apolice=nome, valor=_resumo_lista([c.nome for c in apolice.coberturas]))
+    if chave == "lista_exclusoes":
+        return ValorApolice(apolice=nome, valor=_resumo_lista([e.categoria for e in apolice.exclusoes]))
+    if chave == "lista_clausulas":
+        return ValorApolice(apolice=nome, valor=_resumo_lista(apolice.clausulas_especiais))
+
+    da = apolice.dados_apolice
+    if chave == "vigencia":
+        partes = [p for p in (da.vigencia_inicio, da.vigencia_fim) if p]
+        return ValorApolice(apolice=nome, valor=" a ".join(partes) or None)
+    return ValorApolice(apolice=nome, valor=getattr(da, chave, None) or None)
+
+
+def alinhar_topicos(apolices: Sequence[ApoliceExtraida], nomes: Sequence[str]) -> dict[str, list[ValorApolice]]:
+    """Monta, para cada tópico, o valor de todas as apólices (sem usar LLM)."""
+    chaves = list(CAMPOS_CADASTRAIS) + list(TOPICOS_FICHA) + list(TOPICOS_AGREGADOS)
+    return {
+        chave: [_valores_do_topico(chave, ap, nome) for ap, nome in zip(apolices, nomes)]
+        for chave in chaves
+    }
+
+
+def _divergem(valores: list[ValorApolice]) -> bool:
+    """Há divergência se ao menos duas apólices diferem (tratando 'não informado' como um valor)."""
+    normalizados = {_norm(v.valor or "") for v in valores}
+    return len(normalizados) > 1
+
+
+def _todos_vazios(valores: list[ValorApolice]) -> bool:
+    return not any(v.valor for v in valores)
+
+
+# ─── Comparação determinística (fallback e base do alinhamento) ──────────────
+
+def _diferencas_listas(chave: str, apolices: Sequence[ApoliceExtraida], nomes: Sequence[str]) -> Optional[str]:
+    """Para listas (coberturas/exclusões), aponta o que só aparece em parte das apólices."""
+    extrair = {
+        "lista_coberturas": lambda a: {_norm(c.nome): c.nome for c in a.coberturas},
+        "lista_exclusoes": lambda a: {_norm(e.categoria): e.categoria for e in a.exclusoes},
+        "lista_clausulas": lambda a: {_norm(c): c for c in a.clausulas_especiais},
+    }.get(chave)
+    if not extrair:
+        return None
+    conjuntos = [extrair(a) for a in apolices]
+    comuns = set.intersection(*(set(c) for c in conjuntos)) if conjuntos else set()
+    partes = []
+    for nome, itens in zip(nomes, conjuntos):
+        exclusivos = [itens[k] for k in itens if k not in comuns]
+        if exclusivos:
+            partes.append(f"{nome}: {_resumo_lista(exclusivos, 160)}")
+    return "Itens que não aparecem nas demais — " + " | ".join(partes) if partes else None
+
+
+def comparar_deterministico(
+    apolices: Sequence[ApoliceExtraida], nomes: Optional[Sequence[str]] = None
+) -> RelatorioComparativo:
+    """Comparação sem LLM: aponta onde os valores divergem, sem julgar qual é melhor."""
+    nomes = list(nomes or nomes_unicos(apolices))
+    alinhados = alinhar_topicos(apolices, nomes)
+
+    diferencas: list[DiferencaTopico] = []
+    iguais: list[str] = []
+    for chave, valores in alinhados.items():
+        if _todos_vazios(valores):
+            continue
+        if not _divergem(valores):
+            iguais.append(rotulo_topico(chave))
+            continue
+        ausentes = [v.apolice for v in valores if not v.valor]
+        comentario = (
+            "O documento não trata do tópico em: " + ", ".join(ausentes) + "."
+            if ausentes
+            else "As apólices divergem neste tópico."
         )
-        return response.choices[0].message.content
-
-    elif provider == "anthropic":
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        message = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=prompt_system,
-            messages=[{"role": "user", "content": prompt_user}],
+        extra = _diferencas_listas(chave, apolices, nomes)
+        diferencas.append(
+            DiferencaTopico(
+                topico=chave,
+                rotulo=rotulo_topico(chave),
+                categoria=categoria_topico(chave),
+                valores=valores,
+                relevancia="media",
+                comentario=(extra or comentario),
+            )
         )
-        return message.content[0].text
-
-    elif provider == "google":
-        import google.generativeai as genai
-        genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
-        llm = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=prompt_system,
-            generation_config={"response_mime_type": "application/json"},
-        )
-        response = llm.generate_content(prompt_user)
-        return response.text
-
-    else:
-        raise ValueError(f"Provedor LLM desconhecido: {provider}")
-
-
-def _apolice_to_summary_json(apolice: ApoliceExtraida) -> str:
-    """Serializa a apólice para JSON resumido (sem texto_bruto) para envio ao LLM."""
-    data = apolice.model_dump(exclude={"texto_bruto"})
-    return json.dumps(data, ensure_ascii=False, indent=2)
-
-
-def _build_simple_diff(a: ApoliceExtraida, b: ApoliceExtraida) -> RelatorioComparativo:
-    """
-    Fallback: gera comparação determinística simples sem LLM.
-    Usado quando o LLM falha ou não está configurado.
-    """
-    diffs_cadastrais = []
-
-    def compare_field(campo: str, val_a, val_b, relevancia: str = "media"):
-        va = str(val_a) if val_a else None
-        vb = str(val_b) if val_b else None
-        if va != vb:
-            diffs_cadastrais.append(DiferencaCobertura(
-                campo=campo,
-                valor_a=va,
-                valor_b=vb,
-                relevancia=relevancia,
-                comentario=f"Campo '{campo}' difere entre as apólices."
-            ))
-
-    da = a.dados_apolice
-    db = b.dados_apolice
-    compare_field("seguradora", da.seguradora, db.seguradora, "alta")
-    compare_field("limite_global", da.limite_global, db.limite_global, "alta")
-    compare_field("premio", da.premio, db.premio, "alta")
-    compare_field("base_acionamento", da.base_acionamento, db.base_acionamento, "alta")
-    compare_field("vigencia_inicio", da.vigencia_inicio, db.vigencia_inicio, "media")
-    compare_field("vigencia_fim", da.vigencia_fim, db.vigencia_fim, "media")
-
-    nomes_cob_a = {c.nome for c in a.coberturas}
-    nomes_cob_b = {c.nome for c in b.coberturas}
-    diffs_cob = []
-    for nome in nomes_cob_a - nomes_cob_b:
-        diffs_cob.append(DiferencaCobertura(
-            campo=f"Cobertura: {nome}",
-            valor_a="Presente",
-            valor_b="Ausente",
-            relevancia="alta",
-            comentario=f"Cobertura '{nome}' existe na apólice A mas não na B."
-        ))
-    for nome in nomes_cob_b - nomes_cob_a:
-        diffs_cob.append(DiferencaCobertura(
-            campo=f"Cobertura: {nome}",
-            valor_a="Ausente",
-            valor_b="Presente",
-            relevancia="alta",
-            comentario=f"Cobertura '{nome}' existe na apólice B mas não na A."
-        ))
-
-    cats_exc_a = {e.categoria for e in a.exclusoes}
-    cats_exc_b = {e.categoria for e in b.exclusoes}
-    diffs_exc = []
-    for cat in cats_exc_a - cats_exc_b:
-        diffs_exc.append(DiferencaCobertura(
-            campo=f"Exclusão: {cat}",
-            valor_a="Presente",
-            valor_b="Ausente",
-            relevancia="media",
-            comentario=f"Exclusão '{cat}' presente na apólice A mas não na B."
-        ))
-    for cat in cats_exc_b - cats_exc_a:
-        diffs_exc.append(DiferencaCobertura(
-            campo=f"Exclusão: {cat}",
-            valor_a="Ausente",
-            valor_b="Presente",
-            relevancia="media",
-            comentario=f"Exclusão '{cat}' presente na apólice B mas não na A."
-        ))
 
     return RelatorioComparativo(
-        apolice_a=a.nome_arquivo or "Apólice A",
-        apolice_b=b.nome_arquivo or "Apólice B",
-        diferencas_cadastrais=diffs_cadastrais,
-        diferencas_coberturas=diffs_cob,
-        diferencas_exclusoes=diffs_exc,
-        diferencas_limites=[],
+        apolices=nomes,
+        diferencas=diferencas,
+        topicos_iguais=iguais,
         resumo_executivo=(
-            f"Comparação simplificada entre {a.nome_arquivo or 'Apólice A'} e "
-            f"{b.nome_arquivo or 'Apólice B'}. Foram identificadas "
-            f"{len(diffs_cadastrais)} diferenças cadastrais, "
-            f"{len(diffs_cob)} diferenças em coberturas e "
-            f"{len(diffs_exc)} diferenças em exclusões."
+            f"Comparação simplificada entre {', '.join(nomes)}: {len(diferencas)} tópico(s) com divergência "
+            f"e {len(iguais)} sem divergência. A relevância e a recomendação exigem o modo com LLM."
         ),
-        recomendacao="Análise gerada em modo simplificado. Configure um LLM para obter recomendação detalhada."
+        recomendacao="Análise em modo determinístico: configure uma chave de LLM para obter recomendação.",
+        modo="deterministico",
+    )
+
+
+# ─── Comparação com LLM ──────────────────────────────────────────────────────
+
+def _montar_pedido(alinhados: dict[str, list[ValorApolice]], divergentes: list[str], nomes: Sequence[str]) -> str:
+    blocos = []
+    for chave in divergentes:
+        linhas = [f"- {v.apolice}: {v.valor or '(o documento não trata do tópico)'}" for v in alinhados[chave]]
+        blocos.append(f"### {chave} — {rotulo_topico(chave)}\n" + "\n".join(linhas))
+    return (
+        f"Apólices comparadas: {', '.join(nomes)}\n\n"
+        "Tópicos em que há divergência (valores extraídos dos documentos):\n\n" + "\n\n".join(blocos)
+    )
+
+
+def comparar_apolices(
+    apolices: Sequence[ApoliceExtraida],
+    provider: str = "google",
+    model: str = DEFAULT_MODELS["google"],
+    use_llm: bool = True,
+) -> RelatorioComparativo:
+    """
+    Compara 2 ou mais apólices D&O.
+
+    Args:
+        apolices: apólices já extraídas (mínimo 2).
+        provider: provedor do LLM.
+        model: modelo do provedor.
+        use_llm: com False, usa apenas a comparação determinística.
+    """
+    if len(apolices) < 2:
+        raise ValueError("É necessário ao menos duas apólices para comparar.")
+
+    nomes = nomes_unicos(apolices)
+    base = comparar_deterministico(apolices, nomes)
+    if not use_llm or not base.diferencas:
+        return base
+
+    alinhados = alinhar_topicos(apolices, nomes)
+    divergentes = [d.topico for d in base.diferencas]
+    pedido = _montar_pedido(alinhados, divergentes, nomes)
+
+    try:
+        analise, usado = generate_json_ex(COMPARISON_SYSTEM_PROMPT, pedido, AnaliseLLM, provider, model, max_tokens=12000)
+    except LLMError as exc:
+        logger.error("Falha na análise por LLM; mantendo a comparação determinística: %s", exc)
+        base.recomendacao = f"Análise por LLM indisponível ({exc}). Exibindo apenas as divergências identificadas."
+        return base
+
+    julgamentos = {t.topico: t for t in analise.topicos}
+    relevancias = {"alta", "media", "baixa"}
+    diferencas: list[DiferencaTopico] = []
+    for diff in base.diferencas:
+        j = julgamentos.get(diff.topico)
+        if j:
+            diff.relevancia = j.relevancia if j.relevancia in relevancias else "media"
+            diff.comentario = j.comentario or diff.comentario
+            diff.mais_favoravel = j.mais_favoravel if j.mais_favoravel in nomes else None
+        diferencas.append(diff)
+
+    peso = {"alta": 0, "media": 1, "baixa": 2}
+    diferencas.sort(key=lambda d: peso.get(d.relevancia, 1))
+
+    return RelatorioComparativo(
+        apolices=list(nomes),
+        diferencas=diferencas,
+        topicos_iguais=base.topicos_iguais,
+        resumo_executivo=analise.resumo_executivo or base.resumo_executivo,
+        recomendacao=analise.recomendacao or base.recomendacao,
+        modo="llm",
+        modelo=usado,
     )
 
 
 def compare_policies(
     apolice_a: ApoliceExtraida,
     apolice_b: ApoliceExtraida,
-    provider: str = "openai",
-    model: str = "gpt-4o",
+    provider: str = "google",
+    model: str = DEFAULT_MODELS["google"],
     use_llm: bool = True,
 ) -> RelatorioComparativo:
-    """
-    Compara duas apólices D&O e retorna um relatório de diferenças.
-
-    Args:
-        apolice_a: Primeira apólice extraída.
-        apolice_b: Segunda apólice extraída.
-        provider: Provedor LLM.
-        model: Modelo LLM.
-        use_llm: Se False, usa comparação determinística sem LLM.
-
-    Returns:
-        RelatorioComparativo com todas as diferenças identificadas.
-    """
-    if not use_llm:
-        return _build_simple_diff(apolice_a, apolice_b)
-
-    nome_a = apolice_a.nome_arquivo or "Apólice A"
-    nome_b = apolice_b.nome_arquivo or "Apólice B"
-
-    json_a = _apolice_to_summary_json(apolice_a)
-    json_b = _apolice_to_summary_json(apolice_b)
-
-    prompt_user = COMPARISON_USER_TEMPLATE.format(
-        nome_a=nome_a,
-        nome_b=nome_b,
-        json_a=json_a,
-        json_b=json_b,
-    )
-
-    try:
-        raw_json = _get_llm_response(COMPARISON_SYSTEM_PROMPT, prompt_user, provider, model)
-        data = json.loads(raw_json)
-        relatorio = RelatorioComparativo.model_validate(data)
-        logger.info(f"Comparação LLM concluída: {len(relatorio.diferencas_coberturas)} diffs de cobertura")
-        return relatorio
-    except Exception as e:
-        logger.error(f"Falha na comparação LLM, usando fallback determinístico: {e}")
-        return _build_simple_diff(apolice_a, apolice_b)
+    """Atalho para comparar exatamente duas apólices (compatível com a versão anterior)."""
+    return comparar_apolices([apolice_a, apolice_b], provider, model, use_llm)

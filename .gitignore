@@ -104,6 +104,10 @@ docs/*.tiff
 docs/*.tif
 !docs/.gitkeep
 !docs/README.md
+!docs/relatorio_tecnico.pdf
+
+# Artefatos de entrega são versionados (Pitch Deck, vídeo, relatório, exemplos)
+!Projeto_Final_Artefatos/**
 
 # ===============================
 # Logs e relatórios gerados

@@ -24,7 +24,8 @@ pdf_bytes = generate_policy_pdf(a1)
 print("Policy PDF bytes:", len(pdf_bytes))
 
 rel = compare_policies(a1, a2, use_llm=False)
-print("Comparison diffs - coberturas:", len(rel.diferencas_coberturas), "exclusoes:", len(rel.diferencas_exclusoes))
+grupos = rel.por_categoria()
+print("Comparison diffs - coberturas:", len(grupos.get("cobertura", [])), "exclusoes:", len(grupos.get("exclusao", [])))
 print("Resumo:", rel.resumo_executivo[:100])
 
 cmp_pdf = generate_comparison_pdf(rel)

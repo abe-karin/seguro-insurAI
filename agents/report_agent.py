@@ -1,255 +1,330 @@
 """
-Agente de Relatório — gera PDFs e Markdown a partir das extrações e comparações.
+Agente de Relatório — gera Markdown e PDF da apólice extraída e do comparativo.
+
+O PDF é montado diretamente a partir dos objetos estruturados (e não convertendo
+Markdown), usando a API de tabelas do fpdf2. Isso evita perder linhas de tabela e
+permite quebra automática de texto em cada célula.
 """
 from __future__ import annotations
-import io
+
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
-from models.schemas import ApoliceExtraida, RelatorioComparativo
+from models.schemas import (
+    ApoliceExtraida,
+    CATEGORIAS,
+    DiferencaTopico,
+    RelatorioComparativo,
+    TOPICOS_FICHA,
+    rotulo_topico,
+)
 
 logger = logging.getLogger(__name__)
 
+NA = "N/D"
+RELEVANCIA_ROTULO = {"alta": "ALTA", "media": "MÉDIA", "baixa": "BAIXA"}
+RELEVANCIA_ICONE = {"alta": "🔴", "media": "🟡", "baixa": "🟢"}
+ORDEM_CATEGORIAS = ["acionamento", "cobertura", "limite", "exclusao", "processo", "cadastral"]
 
-# ─── Geração de Markdown ─────────────────────────────────────────────────────
+
+def _agora() -> str:
+    return datetime.now().strftime("%d/%m/%Y %H:%M")
+
+
+def _pagina(pagina: Optional[int]) -> str:
+    return f" (p. {pagina})" if pagina else ""
+
+
+def _celula_md(texto: Optional[str]) -> str:
+    return (texto or NA).replace("|", "\\|").replace("\n", " ")
+
+
+# ─── Markdown ────────────────────────────────────────────────────────────────
 
 def generate_policy_markdown(apolice: ApoliceExtraida) -> str:
-    """Gera relatório Markdown de uma apólice extraída."""
-    da = apolice.dados_apolice
-    seg = apolice.segurado
-    lines = [
-        f"# Relatório de Apólice D&O",
-        f"**Arquivo:** {apolice.nome_arquivo or 'N/D'}  ",
-        f"**Gerado em:** {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+    """Relatório Markdown de uma apólice extraída."""
+    da, seg = apolice.dados_apolice, apolice.segurado
+    linhas = [
+        "# Relatório de Apólice D&O",
+        f"**Arquivo:** {apolice.nome_arquivo or NA}  ",
+        f"**Tipo de documento:** {apolice.tipo_documento or NA}  ",
+        f"**Gerado em:** {_agora()}",
         "",
-        "---",
+        "## 1. Dados da apólice",
         "",
-        "## 1. Dados da Apólice",
+        "| Campo | Valor |",
+        "|-------|-------|",
+        f"| Número da apólice | {_celula_md(da.numero_apolice)} |",
+        f"| Seguradora | {_celula_md(da.seguradora)} |",
+        f"| Vigência | {_celula_md(da.vigencia_inicio)} a {_celula_md(da.vigencia_fim)} |",
+        f"| Prêmio | {_celula_md(da.premio)} |",
+        f"| Limite global | {_celula_md(da.limite_global)} |",
+        f"| Base de acionamento | {_celula_md(da.base_acionamento)} |",
+        f"| Processo SUSEP | {_celula_md(da.processo_susep)} |",
+        f"| Versão do documento | {_celula_md(da.versao_documento)} |",
+        f"| Segurado | {_celula_md(seg.nome_segurado)} |",
         "",
-        f"| Campo | Valor |",
-        f"|-------|-------|",
-        f"| Número da Apólice | {da.numero_apolice or 'N/D'} |",
-        f"| Seguradora | {da.seguradora or 'N/D'} |",
-        f"| Vigência | {da.vigencia_inicio or 'N/D'} a {da.vigencia_fim or 'N/D'} |",
-        f"| Prêmio | {da.premio or 'N/D'} |",
-        f"| Limite Global | {da.limite_global or 'N/D'} |",
-        f"| Base de Acionamento | {da.base_acionamento or 'N/D'} |",
+        "## 2. Ficha técnica D&O",
         "",
-        "## 2. Dados do Segurado",
-        "",
-        f"| Campo | Valor |",
-        f"|-------|-------|",
-        f"| Nome/Razão Social | {seg.nome_segurado or 'N/D'} |",
-        f"| CNPJ | {seg.cnpj or 'N/D'} |",
-        f"| Setor | {seg.setor or 'N/D'} |",
-        "",
-        "## 3. Coberturas",
-        "",
+        "| Tópico | O que o documento diz | Página |",
+        "|--------|-----------------------|--------|",
     ]
+    for item in apolice.ficha_tecnica:
+        pagina = item.fonte.pagina if item.fonte and item.fonte.pagina else NA
+        linhas.append(f"| {rotulo_topico(item.topico)} | {_celula_md(item.valor)} | {pagina} |")
 
+    linhas += ["", "## 3. Coberturas", ""]
     if apolice.coberturas:
         for i, cob in enumerate(apolice.coberturas, 1):
-            lines += [
-                f"### 3.{i} {cob.nome}",
-                f"{cob.descricao}",
+            linhas += [
+                f"### 3.{i} {cob.nome}{_pagina(cob.fonte.pagina if cob.fonte else None)}",
+                cob.descricao or "Sem descrição no documento.",
                 "",
-                f"- **Limite:** {cob.limite or 'N/D'}",
-                f"- **Franquia:** {cob.franquia or 'N/D'}",
-                f"- **Retroatividade:** {cob.retroatividade or 'N/D'}",
+                f"- **Limite:** {cob.limite or NA}",
+                f"- **Franquia:** {cob.franquia or NA}",
+                f"- **Retroatividade:** {cob.retroatividade or NA}",
                 "",
             ]
     else:
-        lines.append("_Nenhuma cobertura identificada._\n")
+        linhas += ["_Nenhuma cobertura identificada._", ""]
 
-    lines += ["## 4. Exclusões", ""]
+    linhas += ["## 4. Exclusões", ""]
     if apolice.exclusoes:
-        for exc in apolice.exclusoes:
-            lines.append(f"- **{exc.categoria}:** {exc.descricao}")
-        lines.append("")
+        linhas += [f"- **{e.categoria}:** {e.descricao or NA}{_pagina(e.fonte.pagina if e.fonte else None)}" for e in apolice.exclusoes]
+        linhas.append("")
     else:
-        lines.append("_Nenhuma exclusão identificada._\n")
+        linhas += ["_Nenhuma exclusão identificada._", ""]
 
-    lines += ["## 5. Cláusulas Especiais", ""]
-    if apolice.clausulas_especiais:
-        for cls in apolice.clausulas_especiais:
-            lines.append(f"- {cls}")
-        lines.append("")
-    else:
-        lines.append("_Nenhuma cláusula especial identificada._\n")
-
+    linhas += ["## 5. Cláusulas especiais", ""]
+    linhas += [f"- {c}" for c in apolice.clausulas_especiais] or ["_Nenhuma cláusula especial identificada._"]
     if apolice.observacoes:
-        lines += ["## 6. Observações", "", apolice.observacoes, ""]
-
-    return "\n".join(lines)
+        linhas += ["", "## 6. Observações", "", apolice.observacoes]
+    return "\n".join(linhas) + "\n"
 
 
 def generate_comparison_markdown(relatorio: RelatorioComparativo) -> str:
-    """Gera relatório Markdown comparativo entre duas apólices."""
-
-    def relevancia_badge(r: str) -> str:
-        icons = {"alta": "🔴", "media": "🟡", "baixa": "🟢"}
-        return icons.get(r, "⚪")
-
-    def diff_table(diffs) -> list[str]:
-        if not diffs:
-            return ["_Nenhuma diferença identificada._", ""]
-        rows = [
-            "| Campo | Apólice A | Apólice B | Relevância | Comentário |",
-            "|-------|-----------|-----------|------------|------------|",
-        ]
-        for d in diffs:
-            rows.append(
-                f"| {d.campo} | {d.valor_a or 'N/D'} | {d.valor_b or 'N/D'} "
-                f"| {relevancia_badge(d.relevancia)} {d.relevancia.capitalize()} | {d.comentario} |"
-            )
-        rows.append("")
-        return rows
-
-    lines = [
-        f"# Relatório Comparativo de Apólices D&O",
-        f"**Gerado em:** {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+    """Relatório Markdown comparativo (2 ou mais apólices)."""
+    nomes = relatorio.apolices
+    linhas = [
+        "# Relatório Comparativo de Apólices D&O",
+        f"**Gerado em:** {_agora()}  ",
+        f"**Apólices:** {' × '.join(nomes)}  ",
+        f"**Análise:** {'LLM (' + relatorio.modelo + ')' if relatorio.modo == 'llm' and relatorio.modelo else relatorio.modo}",
         "",
-        f"**Apólice A:** {relatorio.apolice_a}  ",
-        f"**Apólice B:** {relatorio.apolice_b}",
-        "",
-        "---",
-        "",
-        "## Resumo Executivo",
+        "## Resumo executivo",
         "",
         relatorio.resumo_executivo,
         "",
-        "## Recomendação Técnica",
+        "## Recomendação",
         "",
         relatorio.recomendacao,
         "",
-        "---",
-        "",
-        "## 1. Diferenças Cadastrais",
-        "",
     ]
-    lines += diff_table(relatorio.diferencas_cadastrais)
-    lines += ["## 2. Diferenças em Coberturas", ""]
-    lines += diff_table(relatorio.diferencas_coberturas)
-    lines += ["## 3. Diferenças em Exclusões", ""]
-    lines += diff_table(relatorio.diferencas_exclusoes)
-    lines += ["## 4. Diferenças em Limites", ""]
-    lines += diff_table(relatorio.diferencas_limites)
-
-    return "\n".join(lines)
-
-
-# ─── Geração de PDF ──────────────────────────────────────────────────────────
-
-def _safe_text(text: str) -> str:
-    """Converte texto para latin-1 seguro para FPDF2 com fontes built-in."""
-    import unicodedata
-    # Normaliza para NFD e remove diacríticos não suportados pelo latin-1
-    result = []
-    for ch in text:
-        try:
-            ch.encode("latin-1")
-            result.append(ch)
-        except (UnicodeEncodeError, ValueError):
-            # Tenta normalizar: ç→c, ã→a, etc.
-            normalized = unicodedata.normalize("NFD", ch)
-            ascii_ch = normalized.encode("ascii", "ignore").decode("ascii")
-            result.append(ascii_ch if ascii_ch else "?")
-    return "".join(result)
+    grupos = relatorio.por_categoria()
+    for n, categoria in enumerate([c for c in ORDEM_CATEGORIAS if c in grupos], start=1):
+        linhas += [f"## {n}. {CATEGORIAS.get(categoria, categoria)}", ""]
+        linhas += ["| Tópico | " + " | ".join(nomes) + " | Relevância | Análise |", "|---|" + "---|" * (len(nomes) + 2)]
+        for d in grupos[categoria]:
+            valores = " | ".join(_celula_md(v.valor) + _pagina(v.pagina) if v.valor else NA for v in d.valores)
+            favoravel = f" **Mais favorável:** {d.mais_favoravel}." if d.mais_favoravel else ""
+            linhas.append(
+                f"| {d.rotulo} | {valores} | {RELEVANCIA_ICONE.get(d.relevancia, '')} "
+                f"{RELEVANCIA_ROTULO.get(d.relevancia, d.relevancia)} | {_celula_md(d.comentario)}{favoravel} |"
+            )
+        linhas.append("")
+    if relatorio.topicos_iguais:
+        linhas += ["## Tópicos sem divergência", "", ", ".join(relatorio.topicos_iguais), ""]
+    return "\n".join(linhas) + "\n"
 
 
-def generate_pdf_from_markdown(markdown_text: str, title: str = "Relatorio D&O") -> bytes:
-    """Gera PDF a partir de texto Markdown usando FPDF2."""
-    try:
-        from fpdf import FPDF
+# ─── PDF ─────────────────────────────────────────────────────────────────────
 
-        safe_title = _safe_text(title)
+_SUBSTITUICOES = str.maketrans(
+    {
+        "—": "-", "–": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "×": "x",
+        "→": "->", "≥": ">=", "≤": "<=", "º": "o", "ª": "a", "\u00a0": " ", "\u2009": " ", "\u200b": "",
+    }
+)
 
-        class PDF(FPDF):
-            def header(self):
-                self.set_font("Helvetica", "B", 10)
-                self.set_text_color(60, 60, 60)
-                self.cell(0, 8, safe_title, new_x="LMARGIN", new_y="NEXT", align="C")
-                self.set_draw_color(180, 180, 180)
-                self.line(10, self.get_y(), 200, self.get_y())
-                self.ln(4)
 
-            def footer(self):
-                self.set_y(-15)
-                self.set_font("Helvetica", "I", 8)
-                self.set_text_color(150, 150, 150)
-                self.cell(0, 10, f"D&O Shield - Pag. {self.page_no()}", align="C")
+def _t(texto: Optional[str]) -> str:
+    """Converte para latin-1 (fonte padrão do PDF), preservando acentos do português."""
+    limpo = (texto or "").translate(_SUBSTITUICOES)
+    return limpo.encode("latin-1", "replace").decode("latin-1")
 
-        pdf = PDF()
-        pdf.set_margins(15, 20, 15)  # left, top, right — set BEFORE add_page
-        pdf.set_auto_page_break(auto=True, margin=20)
-        pdf.add_page()
 
-        def _render_line(s: str):
-            """Renderiza uma linha, adicionando nova página se necessário."""
-            if pdf.get_y() > (pdf.h - pdf.b_margin - 15):
-                pdf.add_page()
-            if s.startswith("# "):
-                pdf.set_font("Helvetica", "B", 16)
-                pdf.set_text_color(30, 60, 120)
-                pdf.multi_cell(0, 10, s[2:])
-                pdf.ln(2)
-            elif s.startswith("## "):
-                pdf.set_font("Helvetica", "B", 13)
-                pdf.set_text_color(50, 80, 150)
-                pdf.multi_cell(0, 8, s[3:])
-                pdf.ln(1)
-            elif s.startswith("### "):
-                pdf.set_font("Helvetica", "B", 11)
-                pdf.set_text_color(70, 100, 170)
-                pdf.multi_cell(0, 7, s[4:])
-            elif s.startswith("---"):
-                pdf.set_draw_color(200, 200, 200)
-                pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
-                pdf.ln(3)
-            elif s.startswith("| ") and "|" in s:
-                cells = [c.strip() for c in s.split("|") if c.strip()]
-                if cells and not all(c.startswith("-") for c in cells):
-                    pdf.set_font("Helvetica", size=7)
-                    pdf.set_text_color(40, 40, 40)
-                    truncated = [c[:30] for c in cells[:4]]
-                    row_text = " | ".join(truncated)
-                    pdf.multi_cell(0, 5, row_text)
-            elif s.startswith("- "):
-                pdf.set_font("Helvetica", size=9)
-                pdf.set_text_color(40, 40, 40)
-                pdf.multi_cell(0, 6, "  * " + s[2:])
-            elif s.startswith("**") and s.endswith("**"):
-                pdf.set_font("Helvetica", "B", 10)
-                pdf.set_text_color(40, 40, 40)
-                pdf.multi_cell(0, 6, s.strip("*"))
-            elif s:
-                pdf.set_font("Helvetica", size=10)
-                pdf.set_text_color(40, 40, 40)
-                pdf.multi_cell(0, 6, s)
-            else:
-                pdf.ln(2)
+def _novo_pdf(titulo: str, paisagem: bool = False):
+    from fpdf import FPDF
 
-        for line in markdown_text.split("\n"):
-            stripped = _safe_text(line.strip())
-            try:
-                _render_line(stripped)
-            except Exception as render_err:
-                logger.debug(f"PDF render skip: {render_err}")
+    cabecalho = _t(titulo)
 
-        return bytes(pdf.output())
+    class PDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 9)
+            self.set_text_color(90, 90, 90)
+            self.cell(0, 7, cabecalho, new_x="LMARGIN", new_y="NEXT", align="C")
+            self.set_draw_color(190, 190, 190)
+            self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+            self.ln(3)
 
-    except Exception as e:
-        logger.error(f"Falha ao gerar PDF: {e}")
-        # Fallback: retorna markdown como bytes
-        return markdown_text.encode("utf-8")
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(140, 140, 140)
+            self.cell(0, 8, f"D&O Shield - Pagina {self.page_no()}", align="C")
+
+    pdf = PDF(orientation="L" if paisagem else "P", unit="mm", format="A4")
+    pdf.set_margins(12, 18, 12)
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+    return pdf
+
+
+def _titulo(pdf, texto: str, nivel: int = 1) -> None:
+    tamanhos = {1: (16, 30, 60, 120), 2: (12.5, 45, 80, 150), 3: (10.5, 60, 60, 60)}
+    tam, r, g, b = tamanhos[nivel]
+    pdf.set_font("Helvetica", "B", tam)
+    pdf.set_text_color(r, g, b)
+    pdf.multi_cell(0, tam * 0.5, _t(texto), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1.5)
+
+
+def _paragrafo(pdf, texto: str, tamanho: float = 9.5) -> None:
+    pdf.set_font("Helvetica", "", tamanho)
+    pdf.set_text_color(40, 40, 40)
+    pdf.multi_cell(0, tamanho * 0.52, _t(texto), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+
+def _tabela(pdf, cabecalho: Sequence[str], linhas: Sequence[Sequence[str]], larguras: Sequence[float], tamanho: float = 7.5) -> None:
+    from fpdf.fonts import FontFace
+
+    if not linhas:
+        _paragrafo(pdf, "Nenhum item identificado.")
+        return
+    pdf.set_font("Helvetica", "", tamanho)
+    pdf.set_text_color(40, 40, 40)
+    pdf.set_draw_color(190, 200, 215)
+    with pdf.table(
+        col_widths=tuple(larguras),
+        text_align="LEFT",
+        line_height=tamanho * 0.5,
+        headings_style=FontFace(emphasis="BOLD", color=(255, 255, 255), fill_color=(30, 58, 95)),
+        cell_fill_color=(240, 244, 250),
+        cell_fill_mode="ROWS",
+        padding=1.2,
+        repeat_headings=1,
+    ) as tabela:
+        cab = tabela.row()
+        for texto in cabecalho:
+            cab.cell(_t(texto))
+        for linha in linhas:
+            row = tabela.row()
+            for texto in linha:
+                row.cell(_t(texto))
+    pdf.ln(3)
+
+
+def _saida(pdf) -> bytes:
+    return bytes(pdf.output())
 
 
 def generate_policy_pdf(apolice: ApoliceExtraida) -> bytes:
-    md = generate_policy_markdown(apolice)
-    return generate_pdf_from_markdown(md, title=f"Apólice D&O — {apolice.nome_arquivo or 'N/D'}")
+    """PDF da apólice extraída: dados, ficha técnica, coberturas, exclusões e cláusulas."""
+    da, seg = apolice.dados_apolice, apolice.segurado
+    pdf = _novo_pdf(f"Apolice D&O - {apolice.nome_arquivo or NA}")
+    _titulo(pdf, "Relatório de Apólice D&O")
+    _paragrafo(pdf, f"Arquivo: {apolice.nome_arquivo or NA}   |   Tipo: {apolice.tipo_documento or NA}   |   Gerado em {_agora()}", 8.5)
+
+    _titulo(pdf, "1. Dados da apólice", 2)
+    _tabela(
+        pdf, ["Campo", "Valor"],
+        [
+            ["Número da apólice", da.numero_apolice or NA],
+            ["Seguradora", da.seguradora or NA],
+            ["Vigência", f"{da.vigencia_inicio or NA} a {da.vigencia_fim or NA}"],
+            ["Prêmio", da.premio or NA],
+            ["Limite global", da.limite_global or NA],
+            ["Base de acionamento", da.base_acionamento or NA],
+            ["Processo SUSEP", da.processo_susep or NA],
+            ["Versão do documento", da.versao_documento or NA],
+            ["Segurado", seg.nome_segurado or NA],
+        ],
+        (45, 141), 8,
+    )
+
+    _titulo(pdf, "2. Ficha técnica D&O", 2)
+    _tabela(
+        pdf, ["Tópico", "O que o documento diz", "Pág."],
+        [
+            [rotulo_topico(i.topico), i.valor or "Não trata do assunto", str(i.fonte.pagina) if i.fonte and i.fonte.pagina else "-"]
+            for i in apolice.ficha_tecnica
+        ],
+        (42, 130, 14),
+    )
+
+    _titulo(pdf, "3. Coberturas", 2)
+    _tabela(
+        pdf, ["Cobertura", "Descrição", "Limite", "Franquia", "Pág."],
+        [
+            [c.nome, c.descricao or NA, c.limite or NA, c.franquia or NA, str(c.fonte.pagina) if c.fonte and c.fonte.pagina else "-"]
+            for c in apolice.coberturas
+        ],
+        (38, 90, 24, 24, 10),
+    )
+
+    _titulo(pdf, "4. Exclusões", 2)
+    _tabela(
+        pdf, ["Categoria", "Descrição", "Pág."],
+        [[e.categoria, e.descricao or NA, str(e.fonte.pagina) if e.fonte and e.fonte.pagina else "-"] for e in apolice.exclusoes],
+        (40, 132, 14),
+    )
+
+    _titulo(pdf, "5. Cláusulas especiais", 2)
+    for clausula in apolice.clausulas_especiais or ["Nenhuma cláusula especial identificada."]:
+        _paragrafo(pdf, f"- {clausula}", 9)
+    if apolice.observacoes:
+        _titulo(pdf, "6. Observações", 2)
+        _paragrafo(pdf, apolice.observacoes)
+    return _saida(pdf)
+
+
+def _celula_valor(valor: Optional[str], pagina: Optional[int]) -> str:
+    return f"{valor}{_pagina(pagina)}" if valor else "Não trata do assunto"
 
 
 def generate_comparison_pdf(relatorio: RelatorioComparativo) -> bytes:
-    md = generate_comparison_markdown(relatorio)
-    return generate_pdf_from_markdown(md, title="Relatório Comparativo D&O")
+    """PDF do comparativo (paisagem): uma tabela por categoria, uma coluna por apólice."""
+    nomes = relatorio.apolices
+    pdf = _novo_pdf("Relatorio Comparativo D&O", paisagem=True)
+    _titulo(pdf, "Relatório Comparativo de Apólices D&O")
+    analise = f"LLM ({relatorio.modelo})" if relatorio.modo == "llm" and relatorio.modelo else "determinística"
+    _paragrafo(pdf, f"Apólices: {' x '.join(nomes)}   |   Análise: {analise}   |   Gerado em {_agora()}", 8.5)
+
+    _titulo(pdf, "Resumo executivo", 2)
+    _paragrafo(pdf, relatorio.resumo_executivo)
+    _titulo(pdf, "Recomendação", 2)
+    _paragrafo(pdf, relatorio.recomendacao)
+
+    largura = 273.0
+    fixa_topico, fixa_relevancia, fixa_analise = 34.0, 16.0, 62.0
+    por_apolice = (largura - fixa_topico - fixa_relevancia - fixa_analise) / len(nomes)
+    larguras = (fixa_topico, *([por_apolice] * len(nomes)), fixa_relevancia, fixa_analise)
+
+    grupos = relatorio.por_categoria()
+    for n, categoria in enumerate([c for c in ORDEM_CATEGORIAS if c in grupos], start=1):
+        _titulo(pdf, f"{n}. {CATEGORIAS.get(categoria, categoria)}", 2)
+        linhas = []
+        for d in grupos[categoria]:
+            comentario = d.comentario + (f" Mais favorável: {d.mais_favoravel}." if d.mais_favoravel else "")
+            linhas.append(
+                [d.rotulo, *[_celula_valor(v.valor, v.pagina) for v in d.valores],
+                 RELEVANCIA_ROTULO.get(d.relevancia, d.relevancia), comentario]
+            )
+        _tabela(pdf, ["Tópico", *nomes, "Relevância", "Análise"], linhas, larguras, 7)
+
+    if relatorio.topicos_iguais:
+        _titulo(pdf, "Tópicos sem divergência", 2)
+        _paragrafo(pdf, ", ".join(relatorio.topicos_iguais), 9)
+    return _saida(pdf)

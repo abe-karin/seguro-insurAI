@@ -1,17 +1,27 @@
 """
-Agente de Ingestão — responsável por extrair texto de PDFs e imagens.
-Suporta: pdfplumber (padrão), PyMuPDF, pytesseract (OCR para imagens).
+Agente de Ingestão — extrai o texto de PDFs e imagens, página por página.
+
+Motores suportados: pdfplumber (padrão), PyMuPDF e Tesseract (OCR, para imagens e
+PDFs digitalizados). O texto sai separado por página porque as etapas seguintes
+precisam citar a página de origem de cada informação.
 """
 from __future__ import annotations
+
 import io
+import logging
 import os
 import shutil
-import logging
 from pathlib import Path
-from typing import Union, Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
+PageSource = Union[str, Path, bytes]
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp")
+
+# Abaixo disso o documento é tratado como digitalizado (sem texto embutido).
+MIN_TEXT_CHARS = 100
 
 # Caminhos comuns do Tesseract no Windows (ordem de prioridade)
 _TESSERACT_WINDOWS_PATHS = [
@@ -23,12 +33,10 @@ _TESSERACT_WINDOWS_PATHS = [
 ]
 
 
+# ─── Localização do Tesseract ────────────────────────────────────────────────
+
 def _find_tesseract_binary() -> Optional[str]:
-    """
-    Localiza o binário do Tesseract — primeiro no PATH, depois em caminhos
-    comuns do Windows, por fim na variável de ambiente TESSERACT_CMD.
-    Retorna o caminho encontrado ou None.
-    """
+    """Procura o binário: TESSERACT_CMD, depois o PATH, depois os caminhos do Windows."""
     env_override = os.getenv("TESSERACT_CMD")
     if env_override and Path(env_override).is_file():
         return env_override
@@ -40,37 +48,29 @@ def _find_tesseract_binary() -> Optional[str]:
     for candidate in _TESSERACT_WINDOWS_PATHS:
         if candidate and Path(candidate).is_file():
             return candidate
-
     return None
 
 
 def _configure_tessdata_prefix() -> None:
     """
-    Se existir uma pasta `storage/tessdata/` na raiz do projeto com arquivos
-    .traineddata, aponta o TESSDATA_PREFIX pra lá — permite empacotar o pacote
-    de idioma português (por.traineddata) junto com o projeto, sem exigir
-    admin para gravar em C:\\Program Files\\Tesseract-OCR\\tessdata\\.
+    Aponta TESSDATA_PREFIX para `storage/tessdata/` quando ela existir, permitindo
+    usar o pacote de idioma português sem gravar na instalação do Tesseract.
     """
     if os.getenv("TESSDATA_PREFIX"):
-        return  # usuário já configurou manualmente, respeita
+        return
 
     project_tessdata = Path(__file__).resolve().parent.parent / "storage" / "tessdata"
     if project_tessdata.is_dir() and any(project_tessdata.glob("*.traineddata")):
         os.environ["TESSDATA_PREFIX"] = str(project_tessdata)
-        logger.info(f"TESSDATA_PREFIX configurado: {project_tessdata}")
+        logger.info("TESSDATA_PREFIX configurado: %s", project_tessdata)
 
 
 def _ensure_tesseract_available() -> None:
-    """
-    Configura `pytesseract.tesseract_cmd` se o binário for localizado,
-    e aponta TESSDATA_PREFIX pra pasta local do projeto quando aplicável.
-    Lança RuntimeError com mensagem amigável se o binário não existir.
-    """
+    """Configura o pytesseract ou falha com orientação clara de instalação."""
     import pytesseract
 
     _configure_tessdata_prefix()
 
-    # Se já foi configurado anteriormente e o arquivo existe, nada a fazer
     current = getattr(pytesseract.pytesseract, "tesseract_cmd", None)
     if current and current != "tesseract" and Path(current).is_file():
         return
@@ -78,7 +78,7 @@ def _ensure_tesseract_available() -> None:
     binary = _find_tesseract_binary()
     if binary:
         pytesseract.pytesseract.tesseract_cmd = binary
-        logger.info(f"Tesseract localizado em: {binary}")
+        logger.info("Tesseract localizado em: %s", binary)
         return
 
     raise RuntimeError(
@@ -90,145 +90,139 @@ def _ensure_tesseract_available() -> None:
         "  2. Instale o Tesseract: winget install UB-Mannheim.TesseractOCR\n"
         "     (ou baixe em https://github.com/UB-Mannheim/tesseract/wiki e marque "
         "o idioma 'Portuguese' durante a instalação).\n"
-        "  3. Se instalou em local não padrão, defina a variável de ambiente "
-        "TESSERACT_CMD com o caminho completo do tesseract.exe."
+        "  3. Se instalou em local não padrão, defina TESSERACT_CMD com o caminho "
+        "completo do tesseract.exe."
     )
 
 
-def extract_text_from_pdf_pdfplumber(path: Union[str, Path, bytes]) -> str:
-    """Extrai texto de PDF usando pdfplumber."""
+# ─── Extração por página ─────────────────────────────────────────────────────
+
+def _open_fitz(source: PageSource):
+    import pymupdf as fitz
+
+    if isinstance(source, bytes):
+        return fitz.open(stream=source, filetype="pdf")
+    return fitz.open(str(source))
+
+
+def pages_from_pdf_pdfplumber(source: PageSource) -> list[str]:
+    """Texto de cada página via pdfplumber."""
     import pdfplumber
 
-    if isinstance(path, (str, Path)):
-        with pdfplumber.open(path) as pdf:
-            pages = [page.extract_text() or "" for page in pdf.pages]
-    else:
-        with pdfplumber.open(io.BytesIO(path)) as pdf:
-            pages = [page.extract_text() or "" for page in pdf.pages]
-
-    return "\n\n".join(pages)
+    handle = io.BytesIO(source) if isinstance(source, bytes) else source
+    with pdfplumber.open(handle) as pdf:
+        return [page.extract_text() or "" for page in pdf.pages]
 
 
-def extract_text_from_pdf_pymupdf(path: Union[str, Path, bytes]) -> str:
-    """Extrai texto de PDF usando PyMuPDF (fitz) — melhor para PDFs complexos."""
-    import fitz  # PyMuPDF
-
-    if isinstance(path, bytes):
-        doc = fitz.open(stream=path, filetype="pdf")
-    else:
-        doc = fitz.open(str(path))
-
-    pages = []
-    for page in doc:
-        pages.append(page.get_text("text"))
-    doc.close()
-    return "\n\n".join(pages)
+def pages_from_pdf_pymupdf(source: PageSource) -> list[str]:
+    """Texto de cada página via PyMuPDF — mais tolerante a layouts complexos."""
+    doc = _open_fitz(source)
+    try:
+        return [page.get_text("text") for page in doc]
+    finally:
+        doc.close()
 
 
-def extract_text_from_image_tesseract(path: Union[str, Path, bytes]) -> str:
-    """Extrai texto de imagem via Tesseract OCR (PT-BR + EN)."""
-    _ensure_tesseract_available()
+def _ocr_image(img, lang: str) -> tuple[str, str]:
+    """Aplica OCR e cai para inglês se o pacote de português não estiver instalado."""
     import pytesseract
-    from PIL import Image
-
-    if isinstance(path, bytes):
-        img = Image.open(io.BytesIO(path))
-    else:
-        img = Image.open(path)
 
     try:
-        return pytesseract.image_to_string(img, lang="por+eng")
-    except pytesseract.TesseractError as e:
-        # Mensagem típica quando falta o pacote de idioma português
-        if "por" in str(e).lower() or "language" in str(e).lower():
-            logger.warning(f"Idioma 'por' indisponível, tentando apenas inglês: {e}")
-            return pytesseract.image_to_string(img, lang="eng")
+        return pytesseract.image_to_string(img, lang=lang), lang
+    except pytesseract.TesseractError as exc:
+        if lang != "eng" and ("por" in str(exc).lower() or "language" in str(exc).lower()):
+            logger.warning("Idioma 'por' indisponível, usando apenas inglês: %s", exc)
+            return pytesseract.image_to_string(img, lang="eng"), "eng"
         raise
 
 
-def extract_text_from_pdf_as_images(path: Union[str, Path, bytes]) -> str:
-    """
-    Converte páginas de PDF em imagens e aplica OCR.
-    Útil para PDFs digitalizados (sem texto embutido).
-    """
+def pages_from_image_tesseract(source: PageSource) -> list[str]:
+    """OCR de uma imagem avulsa (uma única página)."""
     _ensure_tesseract_available()
-    import fitz
-    import pytesseract
     from PIL import Image
 
-    if isinstance(path, bytes):
-        doc = fitz.open(stream=path, filetype="pdf")
-    else:
-        doc = fitz.open(str(path))
+    img = Image.open(io.BytesIO(source)) if isinstance(source, bytes) else Image.open(source)
+    text, _ = _ocr_image(img, "por+eng")
+    return [text]
 
-    # Tenta por+eng; se o pacote 'por' não estiver instalado, cai para 'eng'
+
+def pages_from_pdf_as_images(source: PageSource) -> list[str]:
+    """Converte cada página em imagem (zoom 2x) e aplica OCR — para PDFs digitalizados."""
+    _ensure_tesseract_available()
+    import pymupdf as fitz
+    from PIL import Image
+
+    doc = _open_fitz(source)
     lang = "por+eng"
-    texts = []
-    for page in doc:
-        mat = fitz.Matrix(2.0, 2.0)  # 2x zoom para melhor OCR
-        pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("png")
-        img = Image.open(io.BytesIO(img_bytes))
-        try:
-            texts.append(pytesseract.image_to_string(img, lang=lang))
-        except pytesseract.TesseractError as e:
-            if lang != "eng" and ("por" in str(e).lower() or "language" in str(e).lower()):
-                logger.warning(f"Idioma 'por' indisponível, usando apenas inglês nas demais páginas: {e}")
-                lang = "eng"
-                texts.append(pytesseract.image_to_string(img, lang=lang))
-            else:
-                raise
-    doc.close()
-    return "\n\n".join(texts)
+    texts: list[str] = []
+    try:
+        for page in doc:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text, lang = _ocr_image(img, lang)
+            texts.append(text)
+    finally:
+        doc.close()
+    return texts
+
+
+def _total_chars(pages: list[str]) -> int:
+    return sum(len(p.strip()) for p in pages)
+
+
+def _pdf_pages(file_bytes: bytes, ocr_engine: str) -> list[str]:
+    if ocr_engine == "pymupdf":
+        return pages_from_pdf_pymupdf(file_bytes)
+    if ocr_engine == "tesseract":
+        return pages_from_pdf_as_images(file_bytes)
+
+    # pdfplumber é o padrão; se vier pouco texto, tenta PyMuPDF e por fim OCR.
+    pages = pages_from_pdf_pdfplumber(file_bytes)
+    if _total_chars(pages) < MIN_TEXT_CHARS:
+        logger.warning("pdfplumber retornou pouco texto; tentando PyMuPDF...")
+        pages = pages_from_pdf_pymupdf(file_bytes)
+    if _total_chars(pages) < MIN_TEXT_CHARS:
+        if _find_tesseract_binary():
+            logger.warning("PDF parece digitalizado; aplicando OCR via Tesseract...")
+            pages = pages_from_pdf_as_images(file_bytes)
+        else:
+            logger.warning(
+                "PDF parece digitalizado (sem texto embutido) e o Tesseract não está "
+                "instalado — não foi possível aplicar OCR."
+            )
+    return pages
+
+
+def ingest_pages(file_bytes: bytes, filename: str, ocr_engine: str = "pdfplumber") -> list[str]:
+    """
+    Ponto de entrada do agente: devolve o texto do documento, uma string por página.
+
+    Args:
+        file_bytes: conteúdo binário do arquivo.
+        filename: nome do arquivo (define o tipo pela extensão).
+        ocr_engine: 'pdfplumber' | 'pymupdf' | 'tesseract'.
+    """
+    ext = Path(filename).suffix.lower()
+    try:
+        if ext == ".pdf":
+            pages = _pdf_pages(file_bytes, ocr_engine)
+        elif ext in IMAGE_EXTENSIONS:
+            pages = pages_from_image_tesseract(file_bytes)
+        else:
+            raise ValueError(f"Formato não suportado: {ext or 'sem extensão'}")
+    except Exception as exc:
+        logger.error("Erro na ingestão de '%s': %s", filename, exc)
+        raise
+
+    logger.info("Ingestão concluída: '%s' → %d página(s), %d caracteres", filename, len(pages), _total_chars(pages))
+    return pages
 
 
 def ingest_document(file_bytes: bytes, filename: str, ocr_engine: str = "pdfplumber") -> str:
-    """
-    Ponto de entrada principal do agente de ingestão.
-    
-    Args:
-        file_bytes: Conteúdo binário do arquivo
-        filename: Nome do arquivo (usado para detectar tipo)
-        ocr_engine: 'pdfplumber' | 'pymupdf' | 'tesseract'
-    
-    Returns:
-        Texto extraído do documento.
-    """
-    ext = Path(filename).suffix.lower()
-    text = ""
+    """Versão em texto corrido de `ingest_pages` (páginas separadas por linha em branco)."""
+    return "\n\n".join(ingest_pages(file_bytes, filename, ocr_engine))
 
-    try:
-        if ext == ".pdf":
-            if ocr_engine == "pymupdf":
-                text = extract_text_from_pdf_pymupdf(file_bytes)
-            elif ocr_engine == "tesseract":
-                text = extract_text_from_pdf_as_images(file_bytes)
-            else:
-                # pdfplumber como padrão; se retornar vazio, tenta PyMuPDF
-                text = extract_text_from_pdf_pdfplumber(file_bytes)
-                if len(text.strip()) < 100:
-                    logger.warning("pdfplumber retornou texto curto, tentando PyMuPDF...")
-                    text = extract_text_from_pdf_pymupdf(file_bytes)
-                if len(text.strip()) < 100:
-                    # Fallback para OCR só se o Tesseract estiver disponível
-                    if _find_tesseract_binary():
-                        logger.warning("PDF parece ser imagem, aplicando OCR via Tesseract...")
-                        text = extract_text_from_pdf_as_images(file_bytes)
-                    else:
-                        logger.warning(
-                            "PDF parece ser digitalizado (sem texto embutido) e o Tesseract "
-                            "não está instalado — não foi possível aplicar OCR."
-                        )
 
-        elif ext in (".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp"):
-            text = extract_text_from_image_tesseract(file_bytes)
-
-        else:
-            raise ValueError(f"Formato não suportado: {ext}")
-
-    except Exception as e:
-        logger.error(f"Erro na ingestão de '{filename}': {e}")
-        raise
-
-    logger.info(f"Ingestão concluída: '{filename}' → {len(text)} caracteres extraídos")
-    return text
+def format_pages_for_llm(pages: list[str]) -> str:
+    """Junta as páginas com marcadores `[[PÁGINA n]]`, que o LLM usa para citar a fonte."""
+    return "\n\n".join(f"[[PÁGINA {n}]]\n{text.strip()}" for n, text in enumerate(pages, start=1))
