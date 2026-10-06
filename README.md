@@ -156,6 +156,7 @@ Os testes cobrem divisão e fusão de lotes, verificação de ancoragem, compara
 - A comparação avalia **condições contratuais**, não preço, e não substitui parecer de corretor ou jurídico.
 - A recuperação da consulta é lexical (BM25); perguntas com sinônimos muito distantes do texto podem exigir reformulação.
 - O banco SQLite local é efêmero em hospedagens como o Streamlit Cloud.
+- Em uma implantação pública, a chave digitada na barra lateral fica disponível para o processo do app inteiro; prefira configurá-la em `.env` ou nos *secrets* do Streamlit Cloud.
 - OCR de documentos digitalizados de baixa qualidade pode degradar a extração.
 
 ## Integrantes

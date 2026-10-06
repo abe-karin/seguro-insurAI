@@ -293,11 +293,17 @@ def extract_policy(
     resultados: dict[int, ExtracaoLLM] = {}
     # Os lotes são independentes, então vão em paralelo; o progresso é informado pela
     # thread principal (callbacks de interface não podem ser chamados de threads auxiliares).
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALELO, len(lotes))) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(MAX_PARALELO, len(lotes)))
+    try:
         futuros = {pool.submit(extrair_lote, primeira, lote): i for i, (primeira, lote) in enumerate(lotes)}
         for concluido in as_completed(futuros):
             resultados[futuros[concluido]] = concluido.result()  # propaga LLMError
             avisar(f"Parte {len(resultados)}/{len(lotes)} analisada")
+    except Exception:
+        # Um lote falhou: cancela os que ainda não começaram, sem esperar o restante.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
     # A fusão respeita a ordem original das páginas (a primeira informação preenchida prevalece).
     extracoes = [resultados[i] for i in range(len(lotes))]
 

@@ -37,7 +37,8 @@ REGRAS:
 4. Quando a pergunta envolver mais de uma apólice, responda separadamente para cada uma e destaque a diferença.
 5. Seja objetivo e escreva em português."""
 
-CITACAO = re.compile(r"\[([^\[\]]+?),\s*p\.?\s*(\d+)\s*\]")
+# Aceita "[Apólice, p. 12]", "[Apólice, pág. 12]" e "[Apólice, página 12]", sem diferenciar maiúsculas.
+CITACAO = re.compile(r"\[([^\[\]]+?),\s*(?:p|pp|pag|pág|pagina|página)\.?\s*(\d+)\s*\]", re.IGNORECASE)
 
 
 class FonteConsulta(BaseModel):
@@ -170,10 +171,10 @@ def responder(
         raise
 
     fontes = [FonteConsulta(apolice=n, pagina=p, trecho=" ".join(t.split())[:160]) for n, p, t, _ in trechos]
-    recuperadas = {(f.apolice, f.pagina): f for f in fontes}
+    recuperadas = {(f.apolice.lower(), f.pagina): f for f in fontes}
     citadas: list[FonteConsulta] = []
     for nome, pagina in CITACAO.findall(texto):
-        fonte = recuperadas.get((nome.strip(), int(pagina)))
+        fonte = recuperadas.get((nome.strip().lower(), int(pagina)))
         if fonte and fonte not in citadas:
             citadas.append(fonte)
 

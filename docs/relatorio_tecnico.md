@@ -157,7 +157,7 @@ Durante os testes, a API do Gemini apresentou erros 503 (alta demanda) e, sob ch
 
 ## 10. Testes
 
-`python -m unittest discover -s tests -t .` executa a suíte automatizada de 54 testes (sem rede e sem chave de API), que cobre: divisão e fusão de lotes, deduplicação de coberturas, verificação de ancoragem (trecho literal, inventado, página errada, acentos), comparação determinística e com LLM simulado (relevância inválida, apólice favorável inexistente, falha do LLM, 2 e 3 apólices), consulta (BM25, citações válidas e inventadas), persistência, ingestão e geração dos PDFs — incluindo um **teste de regressão que lê o PDF gerado e confere que as linhas das tabelas estão presentes** (a primeira versão exportava só os cabeçalhos).
+`python -m unittest discover -s tests -t .` executa a suíte automatizada de 64 testes (sem rede e sem chave de API), que cobre: divisão e fusão de lotes, deduplicação de coberturas, verificação de ancoragem (trecho literal, inventado, página errada, acentos), comparação determinística e com LLM simulado (relevância inválida, apólice favorável inexistente, falha do LLM, 2 e 3 apólices), consulta (BM25, citações válidas e inventadas), persistência, ingestão e geração dos PDFs — incluindo um **teste de regressão que lê o PDF gerado e confere que as linhas das tabelas estão presentes** (a primeira versão exportava só os cabeçalhos).
 
 ## 11. Fontes dos documentos
 

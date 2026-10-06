@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from agents.comparison_agent import nomes_unicos
 from agents.llm_client import LLMError
 from agents.query_agent import responder
 from storage.database import list_policies, load_policy
@@ -39,17 +40,15 @@ def render_query(provider: str, model: str) -> None:
 
     pergunta = st.text_input("Sua pergunta", key="pergunta_consulta", placeholder="Ex.: Qual o prazo de retroatividade?")
 
-    if st.button("🔎 Perguntar", type="primary", width="stretch", disabled=not (pergunta and escolhidas)):
-        apolices = {}
-        for rotulo in escolhidas:
-            ap = load_policy(opcoes[rotulo], with_pages=True)
-            if ap:
-                apolices[ap.dados_apolice.seguradora or ap.nome_arquivo or rotulo] = ap
+    if st.button("🔎 Perguntar", type="primary", width="stretch", disabled=not (pergunta.strip() and escolhidas)):
+        carregadas = [ap for ap in (load_policy(opcoes[r], with_pages=True) for r in escolhidas) if ap]
+        # Nomes únicos: duas apólices da mesma seguradora não podem se sobrescrever.
+        apolices = dict(zip(nomes_unicos(carregadas), carregadas))
 
         with st.spinner("Consultando os documentos..."):
             try:
                 resposta = responder(pergunta, apolices, provider=provider, model=model)
-            except LLMError as exc:
+            except (LLMError, ValueError) as exc:
                 st.error(f"Não foi possível obter a resposta: {exc}")
                 return
         st.session_state["ultima_resposta"] = resposta

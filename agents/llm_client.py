@@ -30,6 +30,14 @@ RETRY_DELAYS = (3,)
 RODADAS = 2
 PAUSA_ENTRE_RODADAS = 12
 
+# Tempo máximo total de uma chamada (somando retentativas e trocas de modelo). Sem esse teto,
+# o pior caso de retentativas deixaria a interface bloqueada por quase uma hora.
+TEMPO_MAXIMO_S = 600
+
+# Limite de tokens de saída aceito por cada provedor. O gpt-4o aceita no máximo 16.384;
+# no SDK da Anthropic, chamadas sem streaming acima de ~21 mil tokens são recusadas.
+MAX_TOKENS_PROVEDOR = {"google": 32000, "openai": 16000, "anthropic": 16000}
+
 # Modelos alternativos, usados em ordem quando o escolhido está sobrecarregado,
 # sem cota ou indisponível na conta. Evita que a demonstração dependa de um único modelo.
 FALLBACK_MODELS = {
@@ -47,10 +55,20 @@ class LLMTruncatedError(LLMError):
     """A resposta atingiu o limite de tokens de saída e veio incompleta."""
 
 
+_TRANSITORIO = re.compile(
+    r"\b(429|500|503|504)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|DEADLINE_EXCEEDED|overloaded|rate[ _-]?limit",
+    re.IGNORECASE,
+)
+
+
 def _is_transient(error: Exception) -> bool:
-    text = str(error)
-    transient = ("429", "500", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE", "overloaded", "rate")
-    return any(token in text for token in transient) or "timeout" in text.lower() or "timed out" in text.lower()
+    """Erros em que vale repetir a chamada no mesmo modelo (sobrecarga ou limite de taxa)."""
+    return bool(_TRANSITORIO.search(str(error)))
+
+
+def _is_timeout(error: Exception) -> bool:
+    texto = str(error).lower()
+    return "timeout" in texto or "timed out" in texto
 
 
 def _with_retries(call, provider: str):
@@ -65,7 +83,8 @@ def _with_retries(call, provider: str):
             raise
         except Exception as exc:  # noqa: BLE001 — classificamos abaixo
             last = exc
-            if not _is_transient(exc):
+            # Tempo esgotado não se repete no mesmo modelo: passa direto ao próximo da lista.
+            if _is_timeout(exc) or not _is_transient(exc):
                 break
     raise LLMError(f"Falha ao consultar {provider}: {last}") from last
 
@@ -87,8 +106,8 @@ def _thinking_kwargs(model: str) -> dict:
     """
     from google.genai import types
 
-    if "flash-lite" in model:
-        return {}  # sem raciocínio por padrão
+    if "flash-lite" in model or "pro" in model:
+        return {}  # flash-lite já não raciocina por padrão; modelos pro não permitem desligar
     if model.startswith("gemini-3") or "latest" in model:
         return {"thinking_config": types.ThinkingConfig(thinking_level="low")}
     return {"thinking_config": types.ThinkingConfig(thinking_budget=0)}
@@ -145,12 +164,12 @@ def _anthropic(system: str, user: str, model: str, max_tokens: int, schema: Opti
     import anthropic
 
     client = anthropic.Anthropic(api_key=_require_key("anthropic"))
+    # Sem `temperature`: as versões atuais do SDK não aceitam mais esse parâmetro.
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user}],
-        temperature=0.0,
     )
     if message.stop_reason == "max_tokens":
         raise LLMTruncatedError("Resposta truncada pelo limite de tokens de saída.")
@@ -165,14 +184,18 @@ def _dispatch(system, user, provider, model, max_tokens, schema) -> tuple[str, s
     if provider not in _PROVIDERS:
         raise LLMError(f"Provedor LLM desconhecido: {provider}")
     fn = _PROVIDERS[provider]
+    max_tokens = min(max_tokens, MAX_TOKENS_PROVEDOR.get(provider, max_tokens))
 
     candidatos = [model] + [m for m in FALLBACK_MODELS.get(provider, ()) if m != model]
     ultimo: Optional[Exception] = None
+    inicio = time.monotonic()
     for rodada in range(RODADAS):
         if rodada:
             logger.warning("Todos os modelos falharam; nova rodada em %ss.", PAUSA_ENTRE_RODADAS)
             time.sleep(PAUSA_ENTRE_RODADAS)
         for candidato in candidatos:
+            if time.monotonic() - inicio > TEMPO_MAXIMO_S:
+                raise LLMError(f"Tempo máximo de {TEMPO_MAXIMO_S}s esgotado. Último erro: {ultimo}") from ultimo
             try:
                 return _with_retries(lambda: fn(system, user, candidato, max_tokens, schema), provider), candidato
             except LLMTruncatedError:

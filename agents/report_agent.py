@@ -154,6 +154,16 @@ def _t(texto: Optional[str]) -> str:
     return limpo.encode("latin-1", "replace").decode("latin-1")
 
 
+# Uma linha de tabela do fpdf2 não pode ultrapassar uma página; textos muito longos
+# (o modelo nem sempre respeita o limite de palavras) são encurtados no PDF.
+MAX_CHARS_CELULA = 700
+
+
+def _limitar(texto: Optional[str]) -> str:
+    texto = texto or ""
+    return texto if len(texto) <= MAX_CHARS_CELULA else texto[: MAX_CHARS_CELULA - 1].rstrip() + "…"
+
+
 def _novo_pdf(titulo: str, paisagem: bool = False):
     from fpdf import FPDF
 
@@ -222,7 +232,7 @@ def _tabela(pdf, cabecalho: Sequence[str], linhas: Sequence[Sequence[str]], larg
         for linha in linhas:
             row = tabela.row()
             for texto in linha:
-                row.cell(_t(texto))
+                row.cell(_t(_limitar(texto)))
     pdf.ln(3)
 
 

@@ -59,9 +59,10 @@ def _processar(arquivo, indice: int, provider: str, model: str, ocr_engine: str,
     with st.status(f"🤖 {nome} — analisando com {provider}/{model}...", expanded=True) as status:
         try:
             apolice = extract_policy(paginas, filename=nome, provider=provider, model=model, progress=st.write)
-        except LLMError as exc:
+        except (LLMError, ValueError) as exc:
+            # Um arquivo com problema não interrompe o processamento dos demais.
             status.update(label=f"❌ {nome} — falha na análise", state="error")
-            st.error(f"O modelo não conseguiu analisar o documento: {exc}")
+            st.error(f"Não foi possível analisar o documento: {exc}")
             return
         st.write(
             f"✅ {len(apolice.coberturas)} coberturas · {len(apolice.exclusoes)} exclusões · "

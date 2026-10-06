@@ -10,7 +10,7 @@ PROVIDERS = ("google", "openai", "anthropic")
 DEFAULT_MODELS = {
     "google": "gemini-flash-lite-latest",
     "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-5",
+    "anthropic": "claude-sonnet-5",
 }
 
 API_KEY_VARS = {

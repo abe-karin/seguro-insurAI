@@ -50,6 +50,12 @@ class TestConsulta(unittest.TestCase):
         citadas = {(f.apolice, f.pagina) for f in resp.citadas}
         self.assertEqual(citadas, {("Alfa", 2), ("Beta", 2)})  # [Gama, p. 9] não foi recuperada
 
+    def test_citacao_em_outros_formatos_e_reconhecida(self):
+        texto = "Ver [alfa, pág. 2] e [BETA, página 2]."
+        with mock.patch.object(qa, "generate_text_ex", return_value=(texto, "m")):
+            resp = qa.responder("adiantamento de custos de defesa", self.apolices)
+        self.assertEqual({(f.apolice, f.pagina) for f in resp.citadas}, {("Alfa", 2), ("Beta", 2)})
+
     def test_contexto_inclui_ficha_e_trechos(self):
         trechos = [("Alfa", 2, "texto da página dois", 1.0)]
         contexto = qa.montar_contexto(self.apolices, trechos)
@@ -173,6 +179,15 @@ class TestRelatorios(unittest.TestCase):
         self.assertIn("Cobertura sem descricao", generate_policy_markdown(ap))
         self.assertIn("Cobertura sem descricao", _texto_pdf(generate_policy_pdf(ap)))
         self.assertTrue(generate_comparison_pdf(comparar_apolices([ap, apolice_beta()], use_llm=False)).startswith(b"%PDF-"))
+
+    def test_pdf_com_texto_muito_longo_nao_quebra(self):
+        """O fpdf2 recusa linhas maiores que uma página; textos longos são encurtados."""
+        from tests.fixtures import apolice_alfa as nova
+
+        apolices = [nova(), apolice_beta(), nova()]
+        apolices[0].ficha_tecnica[0].valor = "texto muito longo " * 200
+        rel = comparar_apolices(apolices, use_llm=False)
+        self.assertTrue(generate_comparison_pdf(rel).startswith(b"%PDF-"))
 
     def test_markdown_do_comparativo(self):
         md = generate_comparison_markdown(self.rel)

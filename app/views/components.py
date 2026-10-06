@@ -19,6 +19,15 @@ from models.schemas import ApoliceExtraida, CATEGORIAS, RelatorioComparativo, ro
 NA = "N/D"
 
 
+def _gerar_pdf(gerador, objeto) -> bytes | None:
+    """Gera o PDF sem deixar uma falha de exportação derrubar a tela inteira."""
+    try:
+        return gerador(objeto)
+    except Exception as exc:  # noqa: BLE001 — o restante da tela continua utilizável
+        st.warning(f"Não foi possível gerar o PDF ({exc}). O Markdown continua disponível.")
+        return None
+
+
 def _pagina(fonte) -> str:
     return str(fonte.pagina) if fonte and fonte.pagina else "-"
 
@@ -123,9 +132,11 @@ def display_policy(apolice: ApoliceExtraida, key: str = "pol") -> None:
 def policy_downloads(apolice: ApoliceExtraida, base_name: str, key: str) -> None:
     """Botões de download (PDF e Markdown) da apólice."""
     col_pdf, col_md = st.columns(2)
+    pdf = _gerar_pdf(generate_policy_pdf, apolice)
     col_pdf.download_button(
         "⬇️ Baixar relatório PDF",
-        data=generate_policy_pdf(apolice),
+        data=pdf or b"",
+        disabled=pdf is None,
         file_name=f"{base_name}.pdf",
         mime="application/pdf",
         width="stretch",
@@ -188,9 +199,11 @@ def display_comparison(relatorio: RelatorioComparativo, key: str = "cmp") -> Non
             st.write(", ".join(relatorio.topicos_iguais))
 
     col_pdf, col_md = st.columns(2)
+    pdf = _gerar_pdf(generate_comparison_pdf, relatorio)
     col_pdf.download_button(
         "⬇️ Baixar comparativo PDF",
-        data=generate_comparison_pdf(relatorio),
+        data=pdf or b"",
+        disabled=pdf is None,
         file_name="comparativo_do.pdf",
         mime="application/pdf",
         width="stretch",
