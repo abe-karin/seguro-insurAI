@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 class CoberturaPrincipal(BaseModel):
     nome: str = Field(description="Nome da cobertura")
-    descricao: str = Field(description="Descrição da cobertura")
+    descricao: Optional[str] = Field(default=None, description="Descrição da cobertura")
     limite: Optional[str] = Field(default=None, description="Limite de indenização")
     franquia: Optional[str] = Field(default=None, description="Franquia/Dedutível aplicável")
     retroatividade: Optional[str] = Field(default=None, description="Data de retroatividade")
