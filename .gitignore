@@ -1,0 +1,177 @@
+# ===============================
+# Segredos e variáveis de ambiente
+# ===============================
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+secrets/
+credentials.json
+service-account*.json
+
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===============================
+# Ambientes virtuais
+# ===============================
+venv/
+env/
+ENV/
+.venv/
+.virtualenv/
+pipenv/
+poetry.lock
+
+# ===============================
+# Testes e cobertura
+# ===============================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# ===============================
+# Jupyter / IPython
+# ===============================
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ===============================
+# Streamlit
+# ===============================
+.streamlit/secrets.toml
+.streamlit/credentials.toml
+
+# ===============================
+# Dados e storage da aplicação
+# ===============================
+storage/*.db
+storage/*.sqlite
+storage/*.sqlite3
+storage/test_output.*
+storage/exports/
+storage/cache/
+storage/logs/
+storage/tessdata/
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ===============================
+# Documentos de apólices (dados sensíveis dos usuários)
+# ===============================
+docs/*.pdf
+docs/*.PDF
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/*.tiff
+docs/*.tif
+!docs/.gitkeep
+!docs/README.md
+
+# ===============================
+# Logs e relatórios gerados
+# ===============================
+*.log
+logs/
+reports/*.pdf
+reports/*.md
+!reports/.gitkeep
+
+# ===============================
+# IDE / Editores
+# ===============================
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.spyderproject
+.spyproject
+.ropeproject
+
+# ===============================
+# Sistema operacional
+# ===============================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# ===============================
+# Caches de ferramentas
+# ===============================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+cython_debug/
+
+# ===============================
+# Temporários
+# ===============================
+*.tmp
+*.temp
+*.bak
+*.old
+tmp/
+temp/
