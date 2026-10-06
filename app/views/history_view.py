@@ -1,51 +1,44 @@
-"""
-View: Histórico de apólices e comparações.
-"""
+"""Histórico de apólices e comparações realizadas."""
 from __future__ import annotations
+
+import pandas as pd
 import streamlit as st
 
+from app.views.components import display_comparison
+from storage.database import list_comparisons, list_policies, load_comparison
 
-def render_history():
-    st.subheader("📁 Histórico de Análises")
 
-    from storage.database import list_policies, list_comparisons, load_comparison
-    from agents.report_agent import generate_comparison_pdf, generate_comparison_markdown
+def render_history() -> None:
+    st.subheader("📁 Histórico de análises")
+    aba_apolices, aba_comparacoes = st.tabs(["🗂️ Apólices salvas", "📊 Comparações salvas"])
 
-    tab_policies, tab_comparisons = st.tabs(["🗂️ Apólices Salvas", "📊 Comparações Salvas"])
-
-    with tab_policies:
+    with aba_apolices:
         policies = list_policies()
         if policies:
-            import pandas as pd
-            df = pd.DataFrame(policies)[["id", "filename", "seguradora", "segurado", "vigencia", "created_at"]]
-            df.columns = ["ID", "Arquivo", "Seguradora", "Segurado", "Vigência", "Processado em"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            df = pd.DataFrame(policies)[["id", "filename", "seguradora", "segurado", "total_paginas", "created_at"]]
+            df.columns = ["ID", "Arquivo", "Seguradora", "Segurado", "Páginas", "Processado em"]
+            st.dataframe(df, width="stretch", hide_index=True)
             st.caption(f"Total: {len(policies)} apólice(s)")
         else:
             st.info("Nenhuma apólice processada.")
 
-    with tab_comparisons:
-        comparisons = list_comparisons()
-        if comparisons:
-            import pandas as pd
-            df = pd.DataFrame(comparisons)
-            df.columns = ["ID", "Apólice A", "Apólice B", "Realizado em"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption(f"Total: {len(comparisons)} comparação(ões)")
-
-            st.markdown("---")
-            selected_cmp_id = st.selectbox(
-                "Visualizar comparação:",
-                options=[c["id"] for c in comparisons],
-                format_func=lambda cid: next(
-                    (f"#{c['id']} — {c['apolice_a']} × {c['apolice_b']}" for c in comparisons if c["id"] == cid),
-                    str(cid)
-                ),
-            )
-            if selected_cmp_id and st.button("📊 Abrir Comparação", use_container_width=True):
-                rel = load_comparison(selected_cmp_id)
-                if rel:
-                    from app.views.comparison_view import _display_comparison
-                    _display_comparison(rel)
-        else:
+    with aba_comparacoes:
+        comparacoes = list_comparisons()
+        if not comparacoes:
             st.info("Nenhuma comparação realizada.")
+            return
+
+        df = pd.DataFrame(comparacoes)[["id", "titulo", "created_at"]]
+        df.columns = ["ID", "Apólices comparadas", "Realizado em"]
+        st.dataframe(df, width="stretch", hide_index=True)
+        st.caption(f"Total: {len(comparacoes)} comparação(ões)")
+
+        escolhida = st.selectbox(
+            "Visualizar comparação:",
+            options=[c["id"] for c in comparacoes],
+            format_func=lambda cid: next((f"#{c['id']} — {c['titulo']}" for c in comparacoes if c["id"] == cid), str(cid)),
+        )
+        relatorio = load_comparison(escolhida)
+        if relatorio:
+            st.markdown("---")
+            display_comparison(relatorio, key=f"hist_{escolhida}")
