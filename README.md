@@ -80,8 +80,8 @@ A justificativa de cada decisão está em [`docs/DECISOES_DE_ARQUITETURA.md`](do
 Requisitos: **Python 3.11+**. O Tesseract OCR é opcional (necessário apenas para imagens e PDFs digitalizados).
 
 ```bash
-git clone https://github.com/abe-karin/seguro-insurai.git
-cd seguro-insurai
+git clone https://github.com/abe-karin/seguro-insurAI.git
+cd seguro-insurAI
 
 python -m venv venv
 venv\Scripts\activate          # Windows

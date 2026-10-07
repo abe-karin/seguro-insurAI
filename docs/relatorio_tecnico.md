@@ -4,7 +4,7 @@ Projeto Final — InsurMinds · Instituto de Inteligência Artificial Aplicada (
 
 **Grupo:** InsurAi — Juan David Valle Sánchez, Rodrigo Silva Figueiredo, Isabela Del Rio, Karin Abe
 **Data:** 06/10/2026
-**Repositório:** https://github.com/abe-karin/seguro-insurai
+**Repositório:** https://github.com/abe-karin/seguro-insurAI
 **Licença:** MIT
 
 ---
