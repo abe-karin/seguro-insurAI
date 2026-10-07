@@ -50,6 +50,14 @@ class TestDeterministico(unittest.TestCase):
         diff = next(d for d in self.rel.diferencas if d.topico == "lista_exclusoes")
         self.assertIn("Poluicao", diff.comentario)
 
+    def test_traco_e_null_nao_geram_divergencia(self):
+        """Mesmo documento: o modelo escreveu "--" numa extração e null na outra."""
+        a, b = apolice_alfa(), apolice_alfa()
+        a.ficha_por_topico()["custos_defesa"].valor = "--"
+        b.ficha_por_topico()["custos_defesa"].valor = None
+        rel = ca.comparar_apolices([a, b], use_llm=False)
+        self.assertNotIn("custos_defesa", {d.topico for d in rel.diferencas})
+
     def test_exige_pelo_menos_duas_apolices(self):
         with self.assertRaises(ValueError):
             ca.comparar_apolices([apolice_alfa()])

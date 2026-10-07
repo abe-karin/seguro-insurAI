@@ -126,6 +126,17 @@ CATEGORIAS = {
 }
 
 
+# Respostas que o modelo às vezes devolve no lugar de null ("--", "N/D"...).
+# Tratá-las como ausência evita divergências falsas entre documentos iguais.
+_VALORES_VAZIOS = {"", "-", "--", "---", "—", "null", "none", "n/a", "n/d", "nd", "não informado",
+                   "nao informado", "não consta", "nao consta", "não se aplica", "nao se aplica"}
+
+
+def valor_ou_none(valor):
+    texto = (valor or "").strip()
+    return None if texto.lower().strip(" .") in _VALORES_VAZIOS else texto
+
+
 def rotulo_topico(chave: str) -> str:
     if chave in TOPICOS_FICHA:
         return TOPICOS_FICHA[chave][0]

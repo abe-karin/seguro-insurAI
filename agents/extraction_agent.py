@@ -27,6 +27,7 @@ from models.schemas import (
     Fonte,
     ItemFicha,
     TOPICOS_FICHA,
+    valor_ou_none,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,7 +234,7 @@ def normalizar_extracao(extracao: ExtracaoLLM, pages: Sequence[str]) -> Extracao
     ficha: list[ItemFicha] = []
     for chave in TOPICOS_FICHA:
         item = por_topico.get(chave) or ItemFicha(topico=chave, valor=None)
-        valor = (item.valor or "").strip() or None
+        valor = valor_ou_none(item.valor)
         ficha.append(ItemFicha(topico=chave, valor=valor, fonte=_ancorar(item.fonte, pages) if valor else None))
     extracao.ficha_tecnica = ficha
 

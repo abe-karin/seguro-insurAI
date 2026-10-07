@@ -29,6 +29,7 @@ from models.schemas import (
     ValorApolice,
     categoria_topico,
     rotulo_topico,
+    valor_ou_none,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def _valores_do_topico(chave: str, apolice: ApoliceExtraida, nome: str) -> Valor
     """Valor (e página de origem) de um tópico para uma apólice."""
     if chave in TOPICOS_FICHA:
         item = apolice.ficha_por_topico().get(chave)
-        if item and item.valor:
+        if item and valor_ou_none(item.valor):
             return ValorApolice(apolice=nome, valor=item.valor, pagina=item.fonte.pagina if item.fonte else None)
         return ValorApolice(apolice=nome)
 
