@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # O schema mudou em relação à primeira versão (novas colunas e a tabela de páginas).
 # Um nome de arquivo novo evita que um doshield.db antigo derrube o app com "no such column".
-DB_FILENAME = "doshield_v2.db"
+DB_FILENAME = "doshield_v4.db"
 
 
 class Base(DeclarativeBase):
